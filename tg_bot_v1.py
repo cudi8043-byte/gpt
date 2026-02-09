@@ -7,47 +7,44 @@ import base64
 import re
 from openai import OpenAI 
 
-# --- БИБЛИОТЕКИ LLAMA INDEX (RAG) ---
+# --- БИБЛИОТЕКИ RAG ---
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings, Document
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 # ==========================================
-# 1. НАСТРОЙКИ СИСТЕМЫ (ВАЖНО!)
+# 1. НАСТРОЙКИ СИСТЕМЫ
 # ==========================================
-
-# 1.1. Исправляем путь, чтобы Python видел ffmpeg.exe в текущей папке
-# ВАЖНО: Тут должно быть __file__ (два подчеркивания с каждой стороны)
+# Исправляем путь для FFmpeg (голос)
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     os.environ["PATH"] += os.pathsep + current_dir
-except NameError:
-    # Если запускаете через интерактивную консоль, __file__ может не быть
+except:
     pass
 
-# 1.2. Отключаем прокси (чтобы телеграм не вис)
+# Отключаем прокси и лишние предупреждения
 os.environ['NO_PROXY'] = 'api.telegram.org'
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
 for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
     os.environ.pop(key, None)
 
-# 1.3. Отключаем лишние предупреждения
-os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
-
-# 1.4. Папка для базы знаний
+# Папка базы знаний
 KNOWLEDGE_DIR = "./my_knowledge"
 if not os.path.exists(KNOWLEDGE_DIR):
     os.makedirs(KNOWLEDGE_DIR)
 
 # ==========================================
-# 2. КОНФИГУРАЦИЯ БОТА
+# 2. КОНФИГУРАЦИЯ (ИСПРАВЛЕНО СОЕДИНЕНИЕ)
 # ==========================================
 TELEGRAM_TOKEN = '7502929605:AAEKTy1yX3FRe9dPbQ5cK14MckcjySj2diY' 
-LM_STUDIO_URL = "http://localhost:1234/v1"
+
+# ВАЖНО: Используем 127.0.0.1 вместо localhost, чтобы не было ошибки ConnectionError
+LM_STUDIO_URL = "http://26.127.170.20:1234/v1"
 
 print("⚙️ Настраиваю нейросети...")
 
-# Настройка "Мозга" (LLM)
+# Настройка LLM
 Settings.llm = OpenAILike(
     model="local-model",
     api_base=LM_STUDIO_URL,
@@ -57,97 +54,86 @@ Settings.llm = OpenAILike(
     timeout=120.0
 )
 
-# Настройка "Памяти" (Embeddings)
+# Настройка Embeddings
 Settings.embed_model = HuggingFaceEmbedding(
     model_name="intfloat/multilingual-e5-small"
 )
 
-# Глобальная переменная для чат-движка
 chat_engine = None
 
 # ==========================================
 # 3. ИНИЦИАЛИЗАЦИЯ
 # ==========================================
-print("⏳ Загружаю Whisper (Голос)...")
+print("⏳ Загружаю Whisper...")
 try:
     audio_model = whisper.load_model("base")
     print("✅ Whisper загружен!")
-except Exception as e:
+except:
     audio_model = None
-    print(f"⚠️ Whisper не работает: {e}")
+    print("⚠️ Whisper отключен.")
 
 vision_client = OpenAI(base_url=LM_STUDIO_URL, api_key="lm-studio")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Настройка команд в меню (слева внизу)
-bot.set_my_commands([
-    telebot.types.BotCommand("/start", "🔄 Главное меню"),
-    telebot.types.BotCommand("/clear", "🧹 Очистить контекст"),
-    telebot.types.BotCommand("/files", "📂 Список файлов"),
-    telebot.types.BotCommand("/help", "❓ Помощь")
-])
+# ==========================================
+# 4. МЕНЮ И КЛАВИАТУРА
+# ==========================================
+def get_main_keyboard():
+    """Создает кнопки под строкой ввода"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    # Первый ряд кнопок
+    btn1 = types.KeyboardButton("🧹 Очистить контекст")
+    btn2 = types.KeyboardButton("📄 Показать файлы")
+    # Второй ряд
+    btn3 = types.KeyboardButton("❓ Помощь")
+    
+    markup.row(btn1, btn2)
+    markup.row(btn3)
+    return markup
 
 # ==========================================
-# 4. ЛОГИКА RAG (БАЗА ЗНАНИЙ)
+# 5. ЛОГИКА RAG
 # ==========================================
 def rebuild_index():
-    """Перечитывает папку и создает умный чат"""
     global chat_engine
-    print("📚 Индексация базы знаний...")
+    print("📚 Обновляю базу знаний...")
     
     if not os.listdir(KNOWLEDGE_DIR):
         documents = []
     else:
         documents = SimpleDirectoryReader(KNOWLEDGE_DIR).load_data()
     
-    # Заглушка, если папка пустая
     if not documents:
-        documents = [Document(text="Инструкция: У тебя пока нет внешних файлов. Используй свои знания.")]
+        documents = [Document(text="База знаний пуста. Используй общие знания.")]
 
     index = VectorStoreIndex.from_documents(documents)
-    
-    # Память диалога (4000 токенов)
     memory = ChatMemoryBuffer.from_defaults(token_limit=4000)
 
-    # Создаем движок в режиме "Context Chat"
     chat_engine = index.as_chat_engine(
         chat_mode="context",
         memory=memory,
         system_prompt=(
-            "Ты полезный ИИ-ассистент. "
-            "1. Используй контекст из базы знаний для ответов. "
-            "2. Если в базе нет ответа, отвечай, используя свои общие знания. "
-            "3. Будь вежлив."
+            "Ты умный помощник. "
+            "1. Используй информацию из контекста (файлов) для ответа. "
+            "2. Если информации нет в файлах, используй свои знания. "
+            "3. Будь краток и точен."
         ),
         similarity_top_k=3
     )
-    print("✅ База знаний обновлена!")
+    print("✅ Готово!")
 
-# Первичный запуск
 rebuild_index()
 
 # ==========================================
-# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 6. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 def clean_think_tags(text):
-    """Удаляет мысли <think>...</think>"""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
-def get_main_keyboard():
-    """Создает кнопки меню"""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    btn1 = types.KeyboardButton("🧹 Очистить контекст")
-    btn2 = types.KeyboardButton("📄 Показать файлы")
-    btn3 = types.KeyboardButton("❓ Помощь")
-    markup.add(btn1, btn2)
-    markup.add(btn3)
-    return markup
-
 def safe_send(chat_id, text, markup=None):
-    """Безопасная отправка (защита от сбоев сети)"""
     if not text: return
-    # Если маркап не передан, используем главное меню, чтобы кнопки не пропадали
-    if markup is None: 
+    # Если клавиатура не передана, добавляем её принудительно, чтобы не пропадала
+    if markup is None:
         markup = get_main_keyboard()
         
     for i in range(3):
@@ -158,7 +144,6 @@ def safe_send(chat_id, text, markup=None):
             time.sleep(2)
 
 def split_and_send(message, text):
-    """Режет длинный текст"""
     parts = []
     while len(text) > 0:
         if len(text) > 1500:
@@ -174,27 +159,23 @@ def split_and_send(message, text):
         time.sleep(1)
 
 # ==========================================
-# 6. ОБРАБОТЧИКИ СООБЩЕНИЙ
+# 7. ОБРАБОТЧИКИ
 # ==========================================
 
-# --- КОМАНДА /START ---
+# --- КОМАНДА START ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     safe_send(message.chat.id, 
-              "👋 Привет! Я готов к работе.\n"
-              "📄 Кидай файлы для базы знаний.\n"
-              "📷 Кидай фото для анализа.\n"
-              "🎤 Говори голосом или пиши текст.",
+              "👋 Привет! Я готов.\nКнопки управления внизу 👇", 
               markup=get_main_keyboard())
 
-# --- КНОПКА: ОЧИСТИТЬ ---
-@bot.message_handler(func=lambda message: message.text == "🧹 Очистить контекст" or message.text == "/clear")
+# --- КНОПКИ (Обработка текста кнопок) ---
+@bot.message_handler(func=lambda message: message.text == "🧹 Очистить контекст")
 def clear_memory(message):
     chat_engine.reset()
-    safe_send(message.chat.id, "🧠 Память диалога очищена! Начинаем с чистого листа.")
+    safe_send(message.chat.id, "🧠 Память очищена! Я забыл прошлый разговор.")
 
-# --- КНОПКА: ФАЙЛЫ ---
-@bot.message_handler(func=lambda message: message.text == "📄 Показать файлы" or message.text == "/files")
+@bot.message_handler(func=lambda message: message.text == "📄 Показать файлы")
 def show_files(message):
     files = os.listdir(KNOWLEDGE_DIR)
     if not files:
@@ -203,19 +184,18 @@ def show_files(message):
         msg = "📂 **Файлы в базе:**\n" + "\n".join([f"- {f}" for f in files])
     safe_send(message.chat.id, msg)
 
-# --- КНОПКА: ПОМОЩЬ ---
-@bot.message_handler(func=lambda message: message.text == "❓ Помощь" or message.text == "/help")
-def help_message(message):
+@bot.message_handler(func=lambda message: message.text == "❓ Помощь")
+def help_msg(message):
     msg = (
-        "🤖 **Инструкция:**\n"
-        "• Отправь **PDF/DOCX/TXT**, чтобы я выучил их содержимое.\n"
-        "• Отправь **Голосовое**, я переведу его в текст и отвечу.\n"
-        "• Отправь **Фото**, и я опишу, что на нем.\n"
-        "• Нажми **Очистить контекст**, если я запутался."
+        "🤖 **Как пользоваться:**\n"
+        "1. **Файлы:** Пришли PDF/DOCX/TXT — я их выучу.\n"
+        "2. **Вопросы:** Спрашивай что угодно.\n"
+        "3. **Фото:** Пришли картинку — я опишу.\n"
+        "4. **Голос:** Можешь говорить голосом."
     )
     safe_send(message.chat.id, msg)
 
-# --- ЗАГРУЗКА ДОКУМЕНТОВ ---
+# --- ЗАГРУЗКА ФАЙЛОВ ---
 @bot.message_handler(content_types=['document'])
 def handle_docs(message):
     try:
@@ -225,41 +205,32 @@ def handle_docs(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         
-        save_path = os.path.join(KNOWLEDGE_DIR, f_name)
-        with open(save_path, 'wb') as f:
+        with open(os.path.join(KNOWLEDGE_DIR, f_name), 'wb') as f:
             f.write(downloaded)
             
-        rebuild_index() # Пересобираем базу
-        safe_send(message.chat.id, "✅ Файл изучен! Можете задавать вопросы.")
+        rebuild_index()
+        safe_send(message.chat.id, "✅ Файл добавлен в базу знаний!")
     except Exception as e:
-        safe_send(message.chat.id, f"❌ Ошибка: {e}")
+        safe_send(message.chat.id, f"Ошибка: {e}")
 
-# --- ФОТО (VISION) ---
+# --- ФОТО ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
         bot.send_chat_action(message.chat.id, 'typing')
-        caption = message.caption if message.caption else "Что на изображении?"
-        
+        caption = message.caption if message.caption else "Что здесь?"
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded = bot.download_file(file_info.file_path)
         b64 = base64.b64encode(downloaded).decode('utf-8')
         
         response = vision_client.chat.completions.create(
             model="local-model",
-            messages=[{
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": caption},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }],
+            messages=[{"role": "user", "content": [{"type": "text", "text": caption}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
             max_tokens=800
         )
-        ans = clean_think_tags(response.choices[0].message.content)
-        split_and_send(message, ans)
+        split_and_send(message, clean_think_tags(response.choices[0].message.content))
     except:
-        safe_send(message.chat.id, "❌ Ошибка Vision. Убедитесь, что модель поддерживает зрение.")
+        safe_send(message.chat.id, "❌ Ошибка Vision.")
 
 # --- ГОЛОС ---
 @bot.message_handler(content_types=['voice'])
@@ -275,32 +246,30 @@ def handle_voice(message):
         
         safe_send(message.chat.id, f"🗣: {text}")
         message.text = text
-        handle_text(message) # Передаем в текстовый обработчик
+        handle_text(message)
     except Exception as e:
         safe_send(message.chat.id, f"Ошибка голоса: {e}")
 
-# --- ТЕКСТ (ОСНОВНОЙ ЧАТ) ---
+# --- ТЕКСТ (ОБЫЧНЫЙ ЧАТ) ---
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     try:
         bot.send_chat_action(message.chat.id, 'typing')
-        # Запрос к гибридному движку
         response = chat_engine.chat(message.text)
-        ans = clean_think_tags(str(response))
-        split_and_send(message, ans)
+        split_and_send(message, clean_think_tags(str(response)))
     except Exception as e:
-        print(f"Ошибка: {e}")
-        safe_send(message.chat.id, "⚠️ Ошибка. Попробуйте очистить контекст.")
+        print(f"Ошибка чата: {e}")
+        safe_send(message.chat.id, "⚠️ Ошибка связи с нейросетью. Проверьте LM Studio.")
 
 # ==========================================
-# 7. ЗАПУСК
+# 8. ЗАПУСК
 # ==========================================
 if __name__ == '__main__':
-    print("🚀 БОТ ЗАПУЩЕН! Нажмите Ctrl+C для выхода.")
+    print("🚀 Бот с КНОПКАМИ запущен!")
     bot.remove_webhook()
     while True:
         try:
             bot.polling(non_stop=True, interval=2, timeout=60)
         except Exception as e:
-            print(f"🔄 Рестарт через 5 сек... Ошибка: {e}")
+            print(f"🔄 Рестарт... {e}")
             time.sleep(5)
